@@ -1,0 +1,40 @@
+# Google API credentials - NEVER push these
+credentials.json
+tokens/
+token.json
+client_secret*.json
+
+# Environment variables
+.env
+.env.local
+
+# Java compiled files
+*.class
+*.jar
+target/
+
+# Maven
+.mvn/
+mvn.cmd
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# VS Code
+.vscode/
+
+# Mac junk (just in case)
+.DS_Store
+
+# Windows junk
+Thumbs.db
+desktop.ini
+
+# IntelliJ (just in case)
+.idea/
+*.iml
