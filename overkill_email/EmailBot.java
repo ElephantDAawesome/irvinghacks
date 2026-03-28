@@ -1,279 +1,208 @@
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileReader;
-import java.net.HttpURLConnection;
-import java.net.URL;
-import java.util.Arrays;
-import java.util.Base64;
-import java.util.List;
-import java.util.Properties;
-import java.util.Scanner;
+from flask import Flask, request, jsonify
+from openai import OpenAI
+from dotenv import load_dotenv
+import os
+import json
+import requests
 
-import javax.mail.Session;
-import javax.mail.internet.InternetAddress;
-import javax.mail.internet.MimeMessage;
+load_dotenv()
+app = Flask(__name__)
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-import org.json.JSONObject;
+SUBSCRIBERS_FILE = "subscribers.json"
 
-import com.google.api.client.auth.oauth2.Credential;
-import com.google.api.client.extensions.java6.auth.oauth2.AuthorizationCodeInstalledApp;
-import com.google.api.client.extensions.jetty.auth.oauth2.LocalServerReceiver;
-import com.google.api.client.googleapis.auth.oauth2.GoogleAuthorizationCodeFlow;
-import com.google.api.client.googleapis.auth.oauth2.GoogleClientSecrets;
-import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
-import com.google.api.client.json.gson.GsonFactory;
-import com.google.api.client.util.store.FileDataStoreFactory;
-import com.google.api.services.gmail.Gmail;
-import com.google.api.services.gmail.GmailScopes;
-import com.google.api.services.gmail.model.Message;
-import com.google.api.services.gmail.model.MessagePartHeader;
-import com.google.api.services.gmail.model.ModifyMessageRequest;
+def load_subscribers():
+    try:
+        with open(SUBSCRIBERS_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return []
 
-public class EmailBot {
+def save_subscribers(subscribers):
+    with open(SUBSCRIBERS_FILE, "w") as f:
+        json.dump(subscribers, f)
 
-    // -------------------------------------------------------------------------
-    // AUTHENTICATION
-    // -------------------------------------------------------------------------
+# ── Q&A Analysis ──────────────────────────────────────────────────────────────
 
-    private static Gmail getGmailService() throws Exception {
-        GoogleClientSecrets clientSecrets = GoogleClientSecrets.load(
-            GsonFactory.getDefaultInstance(),
-            new FileReader("credentials.json")
-        );
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    email_content = request.json.get("email")
 
-        GoogleAuthorizationCodeFlow flow = new GoogleAuthorizationCodeFlow.Builder(
-            GoogleNetHttpTransport.newTrustedTransport(),
-            GsonFactory.getDefaultInstance(),
-            clientSecrets,
-            Arrays.asList(GmailScopes.GMAIL_MODIFY)
-        )
-        .setDataStoreFactory(new FileDataStoreFactory(new File("tokens")))
-        .setAccessType("offline")
-        .build();
+    response = client.chat.completions.create(
+        model="gpt-5.4",
+        messages=[
+            {"role": "system", "content": """You are an extremely formal and 
+            overly thorough email assistant. Write a response to the email that is 
+            5x more formal and lengthy than necessary. Use overly complex vocabulary,
+            unnecessary disclaimers, and excessive formality. 
+            Return ONLY the response text. No JSON, no labels, no formatting.
+            Always use "Hello," to start and "Best regards," to end, regardless of the email content."""},
+            {"role": "user", "content": email_content}
+        ]
+    )
 
-        LocalServerReceiver receiver = new LocalServerReceiver.Builder()
-            .setPort(8888)
-            .build();
+    return response.choices[0].message.content
 
-        Credential credential = new AuthorizationCodeInstalledApp(flow, receiver)
-            .authorize("user");
+# ── Subscribers ───────────────────────────────────────────────────────────────
 
-        return new Gmail.Builder(
-            GoogleNetHttpTransport.newTrustedTransport(),
-            GsonFactory.getDefaultInstance(),
-            credential
-        )
-        .setApplicationName("OverkillEmail")
-        .build();
-    }
+@app.route("/subscribers")
+def get_subscribers():
+    return jsonify({"subscribers": load_subscribers()})
 
-    // -------------------------------------------------------------------------
-    // EMAIL READING
-    // -------------------------------------------------------------------------
+@app.route("/subscribe", methods=["POST"])
+def subscribe():
+    email = request.json.get("email")
+    subscribers = load_subscribers()
+    if email not in subscribers:
+        subscribers.append(email)
+        save_subscribers(subscribers)
+        return jsonify({"result": f"Added {email}!"})
+    return jsonify({"result": "Already subscribed."})
 
-    private static void printUnreadEmails(Gmail service) throws Exception {
-        List<Message> messages = service.users().messages()
-            .list("me")
-            .setQ("is:unread")
-            .execute()
-            .getMessages();
+@app.route("/unsubscribe", methods=["POST"])
+def unsubscribe():
+    email = request.json.get("email")
+    subscribers = load_subscribers()
+    if email in subscribers:
+        subscribers.remove(email)
+        save_subscribers(subscribers)
+        return jsonify({"result": f"Removed {email}."})
+    return jsonify({"result": "Email not found."})
 
-        if (messages == null || messages.isEmpty()) {
-            System.out.println("No unread emails found.");
-            return;
-        }
+# ── Newsletter ─────────────────────────────────────────────────────────────────
 
-        System.out.println("Found " + messages.size() + " unread emails:");
+@app.route("/send-newsletter", methods=["POST"])
+def send_newsletter():
+    subject = request.json.get("subject")
+    message = request.json.get("message")
+    subscribers = load_subscribers()
 
-        for (Message message : messages) {
-            Message fullMessage = service.users().messages()
-                .get("me", message.getId())
-                .setFormat("full")
-                .execute();
+    if not subscribers:
+        return jsonify({"result": "No subscribers to send to!"})
 
-            List<MessagePartHeader> headers = fullMessage.getPayload().getHeaders();
-            for (MessagePartHeader header : headers) {
-                if (header.getName().equals("Subject")) {
-                    System.out.println("Subject: " + header.getValue());
-                }
-                if (header.getName().equals("From")) {
-                    System.out.println("From: " + header.getValue());
-                }
-            }
-            System.out.println("---");
-        }
-    }
+    # Tell Java to send the emails
+    response = requests.post("http://localhost:8080/send-newsletter", json={
+        "subject": subject,
+        "message": message,
+        "subscribers": subscribers
+    })
 
-    private static String extractBody(Message message) throws Exception {
-        // Simple emails have the body directly in the payload
-        if (message.getPayload().getBody().getData() != null) {
-            byte[] bodyBytes = Base64.getUrlDecoder()
-                .decode(message.getPayload().getBody().getData());
-            return new String(bodyBytes);
-        }
+    return jsonify({"result": f"Sent to {len(subscribers)} subscribers!"})
 
-        // Multipart emails have the body split into parts
-        if (message.getPayload().getParts() != null) {
-            for (var part : message.getPayload().getParts()) {
-                if (part.getMimeType().equals("text/plain")
-                        && part.getBody().getData() != null) {
-                    byte[] bodyBytes = Base64.getUrlDecoder()
-                        .decode(part.getBody().getData());
-                    return new String(bodyBytes);
-                }
-            }
-        }
+# ── Admin Page ─────────────────────────────────────────────────────────────────
 
-        return "(no body found)";
-    }
+@app.route("/admin")
+def admin():
+    return '''
+    <html>
+    <head>
+        <title>OverkillEmail Admin</title>
+        <style>
+            body { font-family: Arial; max-width: 650px; margin: 50px auto; padding: 20px; }
+            h1 { border-bottom: 2px solid black; padding-bottom: 10px; }
+            h3 { margin-top: 30px; }
+            input, textarea { width: 100%; padding: 10px; margin: 8px 0;
+                              font-size: 15px; box-sizing: border-box; }
+            button { background: black; color: white; padding: 10px 20px;
+                     font-size: 15px; cursor: pointer; border: none; margin-top: 5px; }
+            button:hover { background: #333; }
+            #status { color: green; margin-top: 10px; font-weight: bold; }
+            .subscriber { padding: 5px 0; border-bottom: 1px solid #eee; }
+        </style>
+    </head>
+    <body>
+        <h1>OverkillEmail Admin Panel</h1>
 
-    // -------------------------------------------------------------------------
-    // PYTHON / AI ANALYSIS
-    // -------------------------------------------------------------------------
+        <h3>Send Newsletter</h3>
+        <input type="text" id="subject" placeholder="Subject line" />
+        <textarea id="message" rows="10" placeholder="Type your newsletter here..."></textarea>
+        <button onclick="sendNewsletter()">Send to All Subscribers</button>
+        <p id="status"></p>
 
-    private static String analyzeEmail(String emailContent) throws Exception {
-        URL url = new URL("http://localhost:5000/analyze");
-        HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+        <h3>Add Subscriber</h3>
+        <input type="text" id="newEmail" placeholder="email@example.com" />
+        <button onclick="addSubscriber()">Add Subscriber</button>
 
-        conn.setRequestMethod("POST");
-        conn.setRequestProperty("Content-Type", "application/json");
-        conn.setDoOutput(true);
-        conn.setConnectTimeout(30000);
-        conn.setReadTimeout(30000);
+        <h3>Remove Subscriber</h3>
+        <input type="text" id="removeEmail" placeholder="email@example.com" />
+        <button onclick="removeSubscriber()">Remove Subscriber</button>
 
-        // Clean the content so it doesn't break the JSON format
-        String cleanedEmail = emailContent
-            .replace("\\", "\\\\")
-            .replace("\"", "\\\"")
-            .replace("\n", "\\n")
-            .replace("\r", "");
+        <h3>Current Subscribers</h3>
+        <div id="subscriberList">Loading...</div>
 
-        String jsonBody = "{\"email\": \"" + cleanedEmail + "\"}";
-        conn.getOutputStream().write(jsonBody.getBytes());
-
-        Scanner scanner = new Scanner(conn.getInputStream());
-        String response = scanner.useDelimiter("\\A").next();
-        scanner.close();
-
-        return response;
-    }
-
-    // -------------------------------------------------------------------------
-    // EMAIL SENDING
-    // -------------------------------------------------------------------------
-
-    private static void sendReply(Gmail service, String to,
-                                   String subject, String body) throws Exception {
-        Properties props = new Properties();
-        Session session = Session.getDefaultInstance(props, null);
-        MimeMessage email = new MimeMessage(session);
-
-        email.setFrom(new InternetAddress("me"));
-        email.addRecipient(javax.mail.Message.RecipientType.TO, new InternetAddress(to));
-        email.setSubject("Re: " + subject);
-        email.setText(body);
-
-        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-        email.writeTo(buffer);
-        String encodedEmail = Base64.getUrlEncoder().encodeToString(buffer.toByteArray());
-
-        Message message = new Message();
-        message.setRaw(encodedEmail);
-        service.users().messages().send("me", message).execute();
-
-        System.out.println("Replied to: " + to);
-    }
-
-    private static void markAsRead(Gmail service, String messageId) throws Exception {
-        ModifyMessageRequest request = new ModifyMessageRequest()
-            .setRemoveLabelIds(Arrays.asList("UNREAD"));
-
-        service.users().messages()
-            .modify("me", messageId, request)
-            .execute();
-    }
-
-    // -------------------------------------------------------------------------
-    // MAIN LOOP
-    // -------------------------------------------------------------------------
-
-    public static void main(String[] args) throws Exception {
-        System.out.println("Starting OverkillEmail...");
-
-        try {
-            Gmail service = getGmailService();
-            System.out.println("Successfully connected to Gmail!");
-
-            String account = service.users().getProfile("me")
-                .execute().getEmailAddress();
-            System.out.println("Connected as: " + account);
-
-            while (true) {
-                System.out.println("Checking for unread emails...");
-
-                List<Message> messages = service.users().messages()
-                    .list("me")
-                    .setQ("is:unread")
-                    .execute()
-                    .getMessages();
-
-                if (messages == null || messages.isEmpty()) {
-                    System.out.println("No unread emails.");
-                } else {
-                    System.out.println("Found " + messages.size() + " unread emails!");
-
-                    for (Message msg : messages) {
-                        // Fetch full email
-                        Message full = service.users().messages()
-                            .get("me", msg.getId())
-                            .setFormat("full")
-                            .execute();
-
-                        // Extract subject and sender
-                        String subject = "";
-                        String from = "";
-                        for (MessagePartHeader header : full.getPayload().getHeaders()) {
-                            if (header.getName().equals("Subject"))
-                                subject = header.getValue();
-                            if (header.getName().equals("From"))
-                                from = header.getValue();
+        <script>
+            function loadSubscribers() {
+                fetch("/subscribers")
+                    .then(r => r.json())
+                    .then(data => {
+                        const list = document.getElementById("subscriberList");
+                        if (data.subscribers.length === 0) {
+                            list.innerHTML = "<p>No subscribers yet.</p>";
+                        } else {
+                            list.innerHTML = data.subscribers
+                                .map(e => "<div class='subscriber'>" + e + "</div>")
+                                .join("");
                         }
-
-                        // Extract body
-                        String body = extractBody(full);
-
-                        System.out.println("Processing email from: " + from);
-                        System.out.println("Subject: " + subject);
-
-                        // Send to Python for AI analysis
-                        String analysis = analyzeEmail(body);
-
-                        // Parse just the response field from the JSON
-                        String overkillResponse = analysis;
-                        try {
-                            JSONObject outer = new JSONObject(analysis);
-                            JSONObject inner = new JSONObject(outer.getString("result"));
-                            overkillResponse = inner.getString("response");
-                        } catch (Exception parseError) {
-                            System.out.println("Could not parse response: " 
-                                + parseError.getMessage());
-                        }
-
-                        // Send the overkill reply
-                        sendReply(service, from, subject, overkillResponse);
-
-                        // Mark as read so we don't reply again
-                        markAsRead(service, msg.getId());
-                    }
-                }
-
-                System.out.println("Waiting 10 seconds...");
-                Thread.sleep(10000);
+                    });
             }
 
-        } catch (Exception e) {
-            System.out.println("ERROR: " + e.getMessage());
-            e.printStackTrace();
-        }
-    }
-}
+            function sendNewsletter() {
+                const subject = document.getElementById("subject").value;
+                const message = document.getElementById("message").value;
+                if (!subject || !message) {
+                    document.getElementById("status").innerText = "Please fill in both fields!";
+                    return;
+                }
+                document.getElementById("status").innerText = "Sending...";
+                fetch("/send-newsletter", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ subject, message })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById("status").innerText = data.result;
+                });
+            }
+
+            function addSubscriber() {
+                const email = document.getElementById("newEmail").value;
+                if (!email) return;
+                fetch("/subscribe", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ email })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById("status").innerText = data.result;
+                    document.getElementById("newEmail").value = "";
+                    loadSubscribers();
+                });
+            }
+
+            function removeSubscriber() {
+                const email = document.getElementById("removeEmail").value;
+                if (!email) return;
+                fetch("/unsubscribe", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ email })
+                })
+                .then(r => r.json())
+                .then(data => {
+                    document.getElementById("status").innerText = data.result;
+                    document.getElementById("removeEmail").value = "";
+                    loadSubscribers();
+                });
+            }
+
+            loadSubscribers();
+        </script>
+    </body>
+    </html>
+    '''
+
+if __name__ == "__main__":
+    print("Python server running on port 5000...")
+    app.run(port=5000)
